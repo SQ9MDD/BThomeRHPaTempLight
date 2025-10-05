@@ -11,15 +11,17 @@
 #include <Wire.h>                   // biblioteka do obsługi I2C
 #include <Adafruit_BME280.h>        // biblioteka do obsługi czujnika BME280
 
+
 //#define LED_PIN 8                 // ESP32C3-DevKitM-1: GPIO8 (LED wbudowana)
 #define VBAT_ADC_PIN 0              // GPIO0 (ADC1_0)
 #define VBAT_GATE_PIN  1            // GPIO1 (wirtualna masa)
 #define R1 220000.0f                // rezystor R1 dzielnika do VBAT
 #define R2 100000.0f                // rezystor R2 dzielnika do "masy" (GPIO1)
-#define GPIO_DEEP_SLEEP_DURATION 60  // sleep x seconds and then wake up
+#define GPIO_DEEP_SLEEP_DURATION 5  // sleep x seconds and then wake up
 #define TX_DBM 9                    // transmit power in dBm (ESP32-C3: -12, -9, -6, -3, 0, 3, 6, 9 dBm)
 #define bme_pwr 5                   // GPIO5 - zasilanie BME280 
 #define above_sea_lvl 123           // wysokość nad poziomem morza w metrach (dla korekty ciśnienia bezwzględnego)
+#define BH1750_ADDR 0x23            // 0x23 albo 0x5C (gdy ADDR=HIGH)
 
 // Procedura kalibracji pomiaru napięcia VBAT
 // wymaga zasilacza laboratoryjnego i miernika cyfrowego:
@@ -33,7 +35,7 @@
 // wprowadź te wartości do poniższych stałych i wgraj program do ESP32
 // sprawdź czy teraz przesyłane wartości są prawidłowe
 // jeśli nie, powtórz procedurę
-static constexpr float CAL_K   = 1.00f;      // współczynnik kalibracji default 01.00f
+static constexpr float CAL_K   = 1.0f;      // współczynnik kalibracji default 01.00f
 static constexpr float CAL_BmV = 0.0f;       // offset kalibracji w mV 0.0f
 
 RTC_DATA_ATTR static uint32_t bootcount;     // persists bootcount across deep sleep cycles using RTC memory
@@ -41,8 +43,32 @@ float sensor_temperature = 0.1f;
 float sensor_humidity = 0.0f;
 float sensor_dewpoint = 0.0f;
 float sensor_baro = 0.0f;
+float sensor_lux = -1.0f;
 
 Adafruit_BME280 bme; 
+
+static bool bh1750_begin(uint8_t addr = BH1750_ADDR) {
+  Wire.beginTransmission(addr);
+  Wire.write(0x01); // Power ON
+  if (Wire.endTransmission() != 0) return false;
+  delay(10);
+
+  Wire.beginTransmission(addr);
+  Wire.write(0x07); // Reset
+  if (Wire.endTransmission() != 0) return false;
+  delay(10);
+
+  return true;
+}
+
+static float bh1750_read_lux(uint8_t addr=BH1750_ADDR){
+  // Continuous H-Resolution (1 lx, ~120–180 ms)
+  Wire.beginTransmission(addr); Wire.write(0x10); Wire.endTransmission();
+  delay(180);
+  if (Wire.requestFrom((int)addr, 2) != 2) return -1.0f;
+  uint16_t raw = (Wire.read() << 8) | Wire.read();
+  return raw / 1.2f; // przelicznik z datasheetu
+}
 
 void read_bme(){
   delay(10);
@@ -169,8 +195,13 @@ void setup() {
   pinMode(bme_pwr, OUTPUT);
   digitalWrite(bme_pwr, HIGH);  
   delay(10);                                                                 // czas na ustabilizowanie zasilania  
-  Wire.begin();                                      
-  read_bme();   // odczyt BME280 
+  Wire.begin();     
+  if (bootcount % 2 == 0){
+    read_bme();   // odczyt BME280
+  } else {
+    sensor_lux = bh1750_read_lux();
+  }                                
+
   Wire.end();
   digitalWrite(bme_pwr, LOW); 
 // ----- odczyt VBAT -----
@@ -180,9 +211,13 @@ void setup() {
   uint8_t advertisementData[MAX_ADVERTISEMENT_SIZE];                          // bufor na dane reklamowe
   uint8_t size = 0;                                                           // rozmiar danych reklamowych
   BtHomeV2Device device("MS01", "MS01", false);                               // utwórz obiekt urządzenia BTHome
+  if (bootcount % 2 == 0){
   device.addTemperature_neg327_to_327_Resolution_0_01(sensor_temperature);    // device.addTemperature_neg44_to_44_Resolution_0_35(dsTempC);  // alternatywnie mniejszy zakres i gorsza rozdzielczość
   device.addHumidityPercent_Resolution_0_01(sensor_humidity);                 // dodaj pomiar wilgotności RH
   device.addPressureHpa(sensor_baro);                                         // dodaj pomiar ciśnienia barometrycznego
+  } else {
+   device.addIlluminanceLux(sensor_lux); 
+  }  
   device.addVoltage_0_to_65_resolution_0_001(vbat_mV / 1000.0f);              // dodaj pomiar napięcia VBAT
   device.addBatteryPercentage(estimate_battery_percent(vbat_mV/1000.0f));     // dodaj szacunkowy poziom naładowania baterii
   device.addCount_0_4294967295(bootcount);                                    // dodaj licznik restartów
